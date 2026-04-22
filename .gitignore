@@ -1,0 +1,16 @@
+# Streamlit Secrets（DATABASE_URL / ADMIN_PASSWORD を含む）
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
