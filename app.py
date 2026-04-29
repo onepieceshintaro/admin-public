@@ -403,11 +403,20 @@ def _get_anthropic_key() -> str | None:
     return os.getenv("ANTHROPIC_API_KEY")
 
 
-def _summarize_distortion_with_haiku(distortion_name: str, thoughts: list[str]) -> str:
-    """選択された歪みについて、自動思考のリストをHaikuで要約。失敗時は空文字。"""
+def _summarize_distortion_with_haiku(
+    distortion_name: str, thoughts: list[str]
+) -> tuple[str, str | None]:
+    """選択された歪みについて、自動思考のリストをHaikuで要約。
+    戻り値: (要約テキスト, エラーメッセージ or None)
+    """
     key = _get_anthropic_key()
-    if not key or not thoughts:
-        return ""
+    if not key:
+        return "", (
+            "ANTHROPIC_API_KEY が見つかりません。"
+            "admin-public の Streamlit Cloud Secrets に設定してください。"
+        )
+    if not thoughts:
+        return "", "対象の自動思考が0件のため、要約できません。"
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=key)
@@ -430,9 +439,12 @@ def _summarize_distortion_with_haiku(distortion_name: str, thoughts: list[str]) 
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
-        return resp.content[0].text.strip() if resp.content else ""
+        text_out = resp.content[0].text.strip() if resp.content else ""
+        if not text_out:
+            return "", "Haikuからの応答が空でした。"
+        return text_out, None
     except Exception as e:
-        return f"（要約失敗: {e}）"
+        return "", f"API呼び出し失敗: {type(e).__name__}: {e}"
 
 
 with tab_myreport:
@@ -559,14 +571,14 @@ with tab_myreport:
         st.markdown("##### 🧠 認知の歪み（今月）")
         # 集計
         counter: Counter = Counter()
-        records_with: list[tuple[str, str]] = []  # (歪み名, 自動思考)
+        records_with: list[tuple[str, str, str]] = []  # (歪み名, 自動思考, evidence)
         for _, row in cbt_m.iterrows():
             ds = _normalize_distortions(row["distortions"])
             at = (row.get("automatic_thought") or "").strip()
             for d in ds:
                 counter[d["name"]] += 1
                 if at:
-                    records_with.append((d["name"], at))
+                    records_with.append((d["name"], at, d.get("evidence", "")))
 
         if not counter:
             st.caption("今月、判定された歪みはありません。")
@@ -587,19 +599,35 @@ with tab_myreport:
                 [name for name, _ in top],
                 key="myreport_distortion_pick",
             )
-            related_thoughts = [t for d, t in records_with if d == chosen]
-            st.caption(f"「{chosen}」に該当した自動思考: {len(related_thoughts)}件")
+            related = [(t, ev) for d, t, ev in records_with if d == chosen]
+            related_thoughts = [t for t, _ in related]
+            st.caption(f"「{chosen}」に該当した自動思考: {len(related)}件")
 
-            with st.expander("自動思考の一覧（本人のみ閲覧）"):
-                for i, t in enumerate(related_thoughts, 1):
-                    st.markdown(f"{i}. {t}")
+            with st.expander("自動思考と「歪みが見えそうな箇所」（本人のみ閲覧）"):
+                for i, (t, ev) in enumerate(related, 1):
+                    st.markdown(f"**{i}. 自動思考：** {t}")
+                    if ev:
+                        st.markdown(
+                            f"💭 **この辺りに「{chosen}」がありそうです：** {ev}"
+                        )
+                    else:
+                        st.caption(
+                            "（この記録には根拠コメントが残っていません。"
+                            "新しい記録から自動付与されます）"
+                        )
+                    st.markdown("---")
 
             if st.button(f"🤖 「{chosen}」の傾向をHaikuで要約", key="myreport_summarize"):
                 with st.spinner("要約中..."):
-                    summary = _summarize_distortion_with_haiku(chosen, related_thoughts)
-                if summary:
+                    summary, err = _summarize_distortion_with_haiku(
+                        chosen, related_thoughts
+                    )
+                if err:
+                    st.error(err)
+                elif summary:
                     st.session_state["myreport_summary"] = summary
                     st.session_state["myreport_summary_target"] = chosen
+                    st.rerun()
 
             if st.session_state.get("myreport_summary_target") == chosen:
                 summary_text = st.session_state.get("myreport_summary", "")
