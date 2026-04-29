@@ -450,8 +450,8 @@ with tab_myreport:
         placeholder="例: ab12cd34ef56...",
         help="気分トラッカー等のサイドバーに表示されているID",
     )
-    # コピペ時の空白・改行混入をはじく
-    uid_input = (uid_raw or "").strip()
+    # コピペ時の空白・改行・ハイフンの混入をはじく（DBは32桁hexで保存）
+    uid_input = (uid_raw or "").strip().replace("-", "").lower()
 
     # 月選択
     today = pd.Timestamp.now().normalize()
