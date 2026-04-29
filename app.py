@@ -444,12 +444,14 @@ with tab_myreport:
 
     # クエリパラメータ ?u=... を初期値に
     q_uid = st.query_params.get("u", "")
-    uid_input = st.text_input(
+    uid_raw = st.text_input(
         "user_id",
         value=q_uid,
         placeholder="例: ab12cd34ef56...",
         help="気分トラッカー等のサイドバーに表示されているID",
     )
+    # コピペ時の空白・改行混入をはじく
+    uid_input = (uid_raw or "").strip()
 
     # 月選択
     today = pd.Timestamp.now().normalize()
@@ -457,7 +459,7 @@ with tab_myreport:
     month_str = st.text_input(
         "対象月（YYYY-MM）", value=default_month,
         help="その月（1日〜末日）の記録を集計します",
-    )
+    ).strip()
 
     if not uid_input or not month_str:
         st.info("user_id と対象月を入力するとレポートが表示されます。")
@@ -478,6 +480,24 @@ with tab_myreport:
     except Exception as e:
         st.error(f"データ取得失敗: {e}")
         st.stop()
+
+    # ID検証用：このIDに紐づく全期間の記録数を表示（月フィルタ前）
+    total_mood = len(my_mood)
+    total_cbt = len(my_cbt)
+    total_asr = len(my_asr)
+    if total_mood == 0 and total_cbt == 0 and total_asr == 0:
+        st.warning(
+            f"このuser_id（先頭8文字: `{uid_input[:8]}`）に紐づく記録が"
+            "**1件も見つかりませんでした**。IDの貼り間違いや、"
+            "気分トラッカー等で別のIDで記録している可能性があります。"
+        )
+        st.caption(f"入力された全長: {len(uid_input)} 文字（通常32文字）")
+        st.stop()
+    else:
+        st.caption(
+            f"📦 このIDの全期間記録：気分 {total_mood}日 / "
+            f"思考の整理 {total_cbt}件 / 伝え方 {total_asr}件"
+        )
 
     # 月で絞り込み
     def _slice_month(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -500,6 +520,14 @@ with tab_myreport:
         asr_m = my_asr[ev_in_a.fillna(False) | cr_in_a]
     else:
         asr_m = my_asr
+
+    # 月内のデータが全くない場合は別メッセージで案内
+    if mood_m.empty and cbt_m.empty and asr_m.empty:
+        st.info(
+            f"{month_str} の記録は0件でした。"
+            "全期間にはデータがあるので、別の月（YYYY-MM）を入れてみてください。"
+        )
+        st.stop()
 
     # ---------------- 月次サマリー（横断） ----------------
     st.markdown(f"#### 📅 {month_str} のサマリー")
