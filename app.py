@@ -374,7 +374,7 @@ with tab_overview:
 # タブ2: マイレポート（自分のuser_idで横断振り返り + 歪み深堀り）
 # =================================================================
 def _normalize_distortions(raw) -> list[dict]:
-    """旧（list[str]）/新（list[dict{name, evidence}]）両対応。"""
+    """旧（list[str]）/新（list[dict{name, evidence, dismissed}]）両対応。"""
     if not raw:
         return []
     if isinstance(raw, str):
@@ -387,10 +387,53 @@ def _normalize_distortions(raw) -> list[dict]:
     out = []
     for it in raw:
         if isinstance(it, dict) and it.get("name"):
-            out.append({"name": it["name"], "evidence": it.get("evidence", "")})
+            out.append({
+                "name": it["name"],
+                "evidence": it.get("evidence", ""),
+                "dismissed": bool(it.get("dismissed", False)),
+            })
         elif isinstance(it, str):
-            out.append({"name": it, "evidence": ""})
+            out.append({"name": it, "evidence": "", "dismissed": False})
     return out
+
+
+def _dismiss_distortion_in_db(record_id: int, distortion_name: str,
+                               dismissed: bool, user_id: str) -> None:
+    """マイレポートから違和感ありフラグを立てる/外す（cbt_thought_records を直接更新）。"""
+    sel = text(
+        "SELECT distortions FROM cbt_thought_records "
+        "WHERE id = :id AND user_id = :uid"
+    )
+    upd = text(
+        "UPDATE cbt_thought_records SET distortions = :d "
+        "WHERE id = :id AND user_id = :uid"
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(sel, {"id": record_id, "uid": user_id}).first()
+        if not row:
+            return
+        try:
+            current = json.loads(row[0] or "[]")
+        except Exception:
+            current = []
+        new_list = []
+        for it in current:
+            if isinstance(it, dict):
+                d = dict(it)
+                if d.get("name") == distortion_name:
+                    d["dismissed"] = dismissed
+                new_list.append(d)
+            elif isinstance(it, str):
+                new_list.append({
+                    "name": it,
+                    "evidence": "",
+                    "dismissed": dismissed if it == distortion_name else False,
+                })
+        conn.execute(upd, {
+            "d": json.dumps(new_list, ensure_ascii=False),
+            "id": record_id,
+            "uid": user_id,
+        })
 
 
 def _get_anthropic_key() -> str | None:
@@ -569,16 +612,22 @@ with tab_myreport:
     # ---------------- CBT 歪み Top と深掘り ----------------
     if not cbt_m.empty:
         st.markdown("##### 🧠 認知の歪み（今月）")
-        # 集計
+        # 集計（dismissed=True は除外）
         counter: Counter = Counter()
-        records_with: list[tuple[str, str, str]] = []  # (歪み名, 自動思考, evidence)
+        # (歪み名, 自動思考, evidence, record_id)
+        records_with: list[tuple[str, str, str, int]] = []
         for _, row in cbt_m.iterrows():
             ds = _normalize_distortions(row["distortions"])
             at = (row.get("automatic_thought") or "").strip()
+            rid = int(row["id"]) if "id" in row.index else None
             for d in ds:
+                if d.get("dismissed"):
+                    continue  # 違和感ありで外したものは集計しない
                 counter[d["name"]] += 1
-                if at:
-                    records_with.append((d["name"], at, d.get("evidence", "")))
+                if at and rid is not None:
+                    records_with.append(
+                        (d["name"], at, d.get("evidence", ""), rid)
+                    )
 
         if not counter:
             st.caption("今月、判定された歪みはありません。")
@@ -599,22 +648,45 @@ with tab_myreport:
                 [name for name, _ in top],
                 key="myreport_distortion_pick",
             )
-            related = [(t, ev) for d, t, ev in records_with if d == chosen]
-            related_thoughts = [t for t, _ in related]
+            related = [
+                (t, ev, rid) for d, t, ev, rid in records_with if d == chosen
+            ]
+            related_thoughts = [t for t, _, _ in related]
             st.caption(f"「{chosen}」に該当した自動思考: {len(related)}件")
 
             with st.expander("自動思考と「歪みが見えそうな箇所」（本人のみ閲覧）"):
-                for i, (t, ev) in enumerate(related, 1):
-                    st.markdown(f"**{i}. 自動思考：** {t}")
-                    if ev:
-                        st.markdown(
-                            f"💭 **この辺りに「{chosen}」がありそうです：** {ev}"
-                        )
-                    else:
-                        st.caption(
-                            "（この記録には根拠コメントが残っていません。"
-                            "新しい記録から自動付与されます）"
-                        )
+                st.caption(
+                    "💡 違和感があれば「違和感」を押すとこの記録から外せます。"
+                    "外したものは集計・要約から除外されます。"
+                )
+                for i, (t, ev, rid) in enumerate(related, 1):
+                    _c1, _c2 = st.columns([5, 1])
+                    with _c1:
+                        st.markdown(f"**{i}. 自動思考：** {t}")
+                        if ev:
+                            st.markdown(
+                                f"💭 **この辺りに「{chosen}」が見えそうです：** {ev}"
+                            )
+                        else:
+                            st.caption(
+                                "（この記録には根拠コメントが残っていません。"
+                                "新しい記録から自動付与されます）"
+                            )
+                    with _c2:
+                        if st.button(
+                            "違和感",
+                            key=f"myreport_dismiss_{rid}_{i}_{chosen}",
+                            help="この判定を外します",
+                        ):
+                            try:
+                                _dismiss_distortion_in_db(
+                                    rid, chosen, True, uid_input
+                                )
+                                st.cache_data.clear()
+                                st.toast("外しました", icon="🌿")
+                                st.rerun()
+                            except Exception as e:
+                                st.warning(f"外す処理に失敗: {e}")
                     st.markdown("---")
 
             if st.button(f"🤖 「{chosen}」の傾向をHaikuで要約", key="myreport_summarize"):
